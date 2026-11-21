@@ -1,0 +1,66 @@
+name: Build Android Overlay APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 35
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Debug APK
+        run: |
+          if [ -f "settings.gradle.kts" ]; then
+            PROJ_DIR="."
+          elif [ -f "giftap-android-overlay/settings.gradle.kts" ]; then
+            PROJ_DIR="giftap-android-overlay"
+          else
+            echo "settings.gradle.kts not found"
+            exit 1
+          fi
+          cd "$PROJ_DIR"
+          gradle assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/giftap-overlay.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: giftap-overlay-apk
+          path: giftap-overlay.apk
+
+      - name: Publish Direct APK Release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest giftap-overlay.apk --clobber
+          else
+            gh release create latest giftap-overlay.apk \
+              --title "GifTap Android Overlay" \
+              --notes "Download giftap-overlay.apk directly onto any Android phone."
+          fi
