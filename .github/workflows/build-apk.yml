@@ -1,0 +1,98 @@
+name: Build Android Overlay APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 35
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Prepare Release Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.GIFTAP_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.GIFTAP_KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.GIFTAP_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.GIFTAP_KEY_PASS }}
+        run: |
+          KS_PATH="$RUNNER_TEMP/giftap-release.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KS_PATH"
+            echo "GIFTAP_KEYSTORE_PATH=$KS_PATH" >> "$GITHUB_ENV"
+            echo "GIFTAP_KEYSTORE_PASS=$KEYSTORE_PASS" >> "$GITHUB_ENV"
+            echo "GIFTAP_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "GIFTAP_KEY_PASS=$KEY_PASS" >> "$GITHUB_ENV"
+          else
+            RAND_PASS="GifTapRelease2026!"
+            keytool -genkeypair -v \
+              -keystore "$KS_PATH" \
+              -storepass "$RAND_PASS" \
+              -keypass "$RAND_PASS" \
+              -alias "giftap-release" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=GifTap, OU=Mobile, O=GifTap, L=Nairobi, ST=Nairobi, C=KE"
+            echo "GIFTAP_KEYSTORE_PATH=$KS_PATH" >> "$GITHUB_ENV"
+            echo "GIFTAP_KEYSTORE_PASS=$RAND_PASS" >> "$GITHUB_ENV"
+            echo "GIFTAP_KEY_ALIAS=giftap-release" >> "$GITHUB_ENV"
+            echo "GIFTAP_KEY_PASS=$RAND_PASS" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Signed Release APK & Play Store Bundle
+        run: |
+          if [ -f "settings.gradle.kts" ]; then
+            PROJ_DIR="."
+          elif [ -f "giftap-android-overlay/settings.gradle.kts" ]; then
+            PROJ_DIR="giftap-android-overlay"
+          else
+            echo "settings.gradle.kts not found"
+            exit 1
+          fi
+          cd "$PROJ_DIR"
+          gradle assembleRelease bundleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/giftap-overlay.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "$GITHUB_WORKSPACE/giftap-overlay.aab"
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: giftap-overlay-release
+          path: |
+            giftap-overlay.apk
+            giftap-overlay.aab
+
+      - name: Publish Direct APK & Play Bundle Release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest giftap-overlay.apk giftap-overlay.aab --clobber
+          else
+            gh release create latest giftap-overlay.apk giftap-overlay.aab \
+              --title "GifTap Android Overlay (Signed Release)" \
+              --notes "Hardened signed Release APK (giftap-overlay.apk) and Google Play Store bundle (giftap-overlay.aab)."
+          fi
